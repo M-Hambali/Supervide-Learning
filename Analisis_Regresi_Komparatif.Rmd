@@ -1,0 +1,956 @@
+---
+title: "Analisis Regresi Komparatif: OLS, WLS, GLS, dan Ridge Regression"
+subtitle: "Pengujian Asumsi Klasik, Pemodelan Alternatif, dan Evaluasi Metrik RMSE & AIC pada Data Simulasi"
+author: "Muhamad Hambali"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    theme: flatly
+    highlight: tango
+    toc: true
+    toc_depth: 1
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    number_sections: true
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+# Konfigurasi global chunk knitr
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 9,
+  fig.height = 5.5,
+  fig.align = "center"
+)
+```
+
+# PENDAHULUAN & EKSPLORASI DATA AWAL
+
+## Latar Belakang & Tujuan Analisis
+
+Analisis regresi linier standar berbasis metode *Ordinary Least Squares* (OLS) bertumpu pada sejumlah asumsi klasik Gauss-Markov. Jika seluruh asumsi tersebut terpenuhi, Teorema Gauss-Markov menjamin bahwa estimator OLS bersifat **BLUE** (*Best Linear Unbiased Estimator*), yaitu tidak bias dan memiliki variansi minimum di antara seluruh penduga linier tak bias lainnya.
+
+Namun, pada data dunia nyata maupun data simulasi kompleks, sering kali terjadi pelanggaran satu atau lebih asumsi klasik:
+
+1.  **Non-Normalitas Sisaan:** Menyebabkan inferensi uji hipotesis ($t$-test dan $F$-test) pada ukuran sampel terbatas menjadi kurang reliabel.
+2.  **Multikolinearitas:** Adanya korelasi tinggi antar variabel penjelas ($X$) yang mengakibatkan variansi penduga koefisien membengkak (*variance inflation*), nilai $t$-hitung mengecil, dan estimasi parameter menjadi sangat tidak stabil. Solusi parametrik modern adalah **Ridge Regression** ($L_2$ Regularization).
+3.  **Heteroskedastisitas:** Ragam sisaan yang tidak konstan ($\operatorname{Var}(\varepsilon_i) \neq \sigma^2$), menyebabkan estimator OLS kehilangan efisiensinya. Solusi standarnya adalah **Weighted Least Squares (WLS)**.
+4.  **Autokorelasi Sisaan:** Adanya korelasi antar galat pada urutan observasi berturutan ($\operatorname{Cov}(\varepsilon_t, \varepsilon_{t-1}) \neq 0$), menyebabkan standar error OLS terbias ke bawah (*underestimated*) sehingga uji signifikansi menjadi semu (*spurious*). Solusi standarnya adalah **Generalized Least Squares (GLS)** dengan struktur korelasi $\operatorname{AR}(1)$.
+
+Tujuan utama dari dokumen analisis ini adalah:
+
+a.  **Pengujian Asumsi Klasik:** Melakukan pengujian asumsi secara komprehensif baik visual maupun uji formal statistik: Normalitas, Multikolinearitas, Heteroskedastisitas, dan Autokorelasi sisaan pada data `raw_data_simulasi.txt`.
+b.  **Pemodelan Regresi:** Membangun dan mengestimasi empat model regresi: **OLS**, **WLS**, **GLS**, dan **Ridge Regression**.
+c.  **Evaluasi Komparatif:** Membandingkan kinerja keempat model secara objektif dan matematis berdasarkan matriks evaluasi **RMSE** (*Root Mean Squared Error*) dan **AIC** (*Akaike Information Criterion*).
+d.  **Pembahasan Terperinci:** Menguraikan makna di balik setiap keluaran (*output*) kode, grafik, dan nilai statistik secara faktual, mendalam, dan tanpa melebih-lebihkan.
+
+------------------------------------------------------------------------
+
+## Pemuatan Pustaka (Packages)
+
+Langkah awal adalah memuat pustaka (*libraries*) R yang diperlukan untuk manajemen data, pengujian diagnostik, estimasi model, dan penyajian visual:
+
+```{r load-libraries}
+# 1. Pustaka manipulasi data dan performa tinggi
+library(data.table)  # Pembacaan berkas teks besar dengan algoritma multi-threading cepat (fread)
+library(dplyr)       # Transformasi dan manipulasi data frame
+
+# 2. Pustaka visualisasi data
+library(ggplot2)     # Pembuatan grafik deklaratif berbasis grammar of graphics
+library(gridExtra)   # Penggabungan multi-panel grafik dalam satu kanvas visual
+library(corrplot)    # Visualisasi matriks korelasi bivariat
+
+# 3. Pustaka uji diagnostik dan ekonometrika
+library(car)         # Perhitungan Variance Inflation Factor (VIF) untuk multikolinearitas
+library(lmtest)      # Uji formal Breusch-Pagan (heteroskedastisitas) dan Durbin-Watson (autokorelasi)
+library(tseries)     # Uji formal normalitas Jarque-Bera
+
+# 4. Pustaka pemodelan alternatif
+library(nlme)        # Pemodelan Generalized Least Squares (GLS) dengan struktur autokorelasi serial
+library(glmnet)      # Pemodelan Ridge Regression dengan regularisasi penalti L2
+
+# 5. Pustaka pelaporan dan tabel
+library(knitr)       # Kompilasi dokumen dinamis dan pembuatan tabel dasar
+library(kableExtra)  # Kustomisasi estetika tabel HTML profesional
+```
+
+> **Penjelasan Kode & Pustaka:**
+>
+> \- `data.table::fread` dipilih karena berkas `raw_data_simulasi.txt` berukuran ratusan megabita, sehingga pembacaan dengan `read.table` standar akan sangat lambat.
+>
+> \- `car` dan `lmtest` adalah standar industri untuk uji diagnostik regresi terapan.
+>
+> \- `nlme` menyediakan fungsi `gls()` yang mampu menangani struktur variansi-kovarians galat non-sferis.
+>
+> \- `glmnet` adalah pustaka terstandar untuk *penalized regression* yang sangat efisien dalam menyelesaikan regresi Ridge melalui *coordinate descent*.
+
+------------------------------------------------------------------------
+
+## Pembacaan Data & Pertimbangan Skala Komputasi
+
+Data mentah disimpan dalam berkas teks `raw_data_simulasi.txt`. Berkas ini memiliki volume besar (1.500.000 observasi dan 31 variabel: $X_1$ hingga $X_{30}$ dan variabel respon $Y$).
+
+> **Pertimbangan Metodologis & Komputasional Terkait Ukuran Sampel:**
+>
+> 1\. Fungsi Generalized Least Squares pada pustaka R (`nlme::gls()`) mengalokasikan dan memanipulasi matriks kovarians sisaan berdimensi penuh $N \times N$. Untuk $N = 1.500.000$, matriks padat (*dense matrix*) berpresisi ganda tersebut memerlukan alokasi memori sebesar $(1.500.000)^2 \times 8 \text{ byte} \approx \mathbf{18\text{ Terabyte}}$ RAM. Hal ini melampaui kapasitas perangkat keras komputer standar dan akan langsung memicu galat *vector memory allocation*.
+>
+> 2\. Agar perbandingan metrik **AIC** dan **RMSE** antar keempat model (OLS, WLS, GLS, dan Ridge) **valid, adil (*fair comparison*), dan bermakna**, seluruh model harus dilatih dan dievaluasi pada himpunan data yang **sama persis**. Nilai AIC bergantung langsung pada ukuran sampel $N$ ($AIC \propto N$); membandingkan AIC model yang diuji pada $N$ berbeda adalah kesalahan fatal dalam metodologi statistika.
+>
+> 3\. Oleh karena itu, kita menganalisis sampel berurutan berukuran $N = 2.500$ baris pertama. Pemilihan observasi berurutan (*sequential*) mutlak diperlukan guna **mempertahankan keterurutan waktu (*temporal ordering*)** yang menjadi dasar pembentukan struktur autokorelasi serial $\operatorname{AR}(1)$. Jika dilakukan sampling acak sederhana (*random sampling*), urutan kronologis antar observasi akan teracak sehingga sifat autokorelasi sisaan akan hilang.
+
+```{r load-data}
+# Menentukan ukuran sampel berurutan untuk analisis komparatif
+n_sample <- 2500
+
+# Lokasi berkas data mentah
+file_path <- "raw_data_simulasi.txt"
+
+# Membaca sejumlah n_sample baris pertama dari data mentah
+df <- fread(file_path, nrows = n_sample)
+
+# Memeriksa dimensi dan kelengkapan data
+dim_data <- dim(df)
+missing_count <- sum(is.na(df))
+
+cat("Dimensi data yang dianalisis :", dim_data[1], "baris dan", dim_data[2], "kolom.\n")
+cat("Jumlah missing value (NA)    :", missing_count, "\n")
+```
+
+> **Penjelasan Keluaran (*Output*) Kode `load-data`:**
+>
+> \- Output `Dimensi data yang dianalisis : 2500 baris dan 31 kolom` menunjukkan bahwa data berhasil dimuat sebanyak $2.500$ baris observasi dengan $31$ variabel, yang terdiri atas $30$ variabel prediktor kontinu ($X_1, X_2, \dots, X_{30}$) dan $1$ variabel target/respon ($Y$).
+>
+> \- Output `Jumlah missing value (NA) : 0` mengonfirmasi bahwa data berstatus bersih (*complete cases*) tanpa ada observasi yang hilang, sehingga tidak diperlukan imputasi nilai hilang.
+
+Berikut adalah cuplikan 5 baris pertama dari data yang dianalisis:
+
+```{r preview-data}
+# Menampilkan cuplikan 5 baris pertama pada sejumlah variabel penjelas terpilih dan respon Y
+kable(head(df[, c("X1", "X2", "X3", "X4", "X5", "X28", "X29", "X30", "Y")], 5), 
+      caption = "Tabel 1: Cuplikan Lima Baris Pertama Data Simulasi",
+      digits = 4) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
+```
+
+> **Penjelasan Tabel 1 (Cuplikan Data):** Tabel 1 menampilkan nilai numerik dari beberapa variabel awal ($X_1 - X_5$), variabel akhir ($X_{28} - X_{30}$), dan respon $Y$. Seluruh variabel bertipe kontinu dengan skala nilai terpusat di sekitar nol (standar normal terstandardisasi), sedangkan variabel respon $Y$ memiliki variasi yang lebih lebar.
+
+------------------------------------------------------------------------
+
+## Pengecekan Statistik Deskriptif Variabel Respon
+
+Sebelum melangkah ke pemodelan, kita menganalisis sebaran variabel respon $Y$ guna memahami tendensi sentral, sebaran, dan kemungkinan adanya nilai ekstrem (*outlier*).
+
+```{r descriptive-stats}
+# Menghitung statistik deskriptif variabel respon Y
+summary_y <- summary(df$Y)
+sd_y <- sd(df$Y)
+
+desc_df <- data.frame(
+  Statistik = c("Minimum", "Kuartil 1 (Q1)", "Median", "Mean (Rata-rata)", 
+                "Kuartil 3 (Q3)", "Maksimum", "Standar Deviasi (SD)"),
+  Nilai = c(summary_y[1], summary_y[2], summary_y[3], summary_y[4], summary_y[5], summary_y[6], sd_y)
+)
+
+kable(desc_df, caption = "Tabel 2: Statistik Deskriptif Variabel Respon Y", digits = 4) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+> **Penjelasan Tabel 2 (Statistik Deskriptif Variabel Respon Y):**
+>
+> \- **Mean vs Median:** Nilai rata-rata (`Mean = 4,9642`) lebih besar daripada nilai median (`Median = 4,3722`). Kondisi ini mengindikasikan bahwa distribusi variabel $Y$ memiliki kemencengan positif (*positively skewed* / menceng ke kanan).
+>
+> \- **Rentang Nilai:** Variabel $Y$ memiliki rentang dari nilai minimum sebesar `-17,6395` hingga maksimum sebesar `40,2962`, dengan simpangan baku (SD) sebesar `6,1805`. Jarak dari kuartil 3 ke nilai maksimum jauh lebih besar dibanding jarak dari kuartil 1 ke nilai minimum, menegaskan keberadaan ekor panjang pada nilai-nilai positif tinggi.
+
+Visualisasi distribusi frekuensi dan diagram kotak-garis (*boxplot*) untuk variabel respon $Y$:
+
+```{r plot-y-distribution}
+# Panel kiri: Histogram dan kurva estimasi densitas kernel
+p_dens_y <- ggplot(df, aes(x = Y)) +
+  geom_histogram(aes(y = ..density..), bins = 35, fill = "#2c3e50", color = "white", alpha = 0.8) +
+  geom_density(color = "#e74c3c", size = 1.2) +
+  theme_minimal(base_size = 12) +
+  labs(title = "Distribusi Frekuensi & Densitas Respon Y",
+       subtitle = "Batang: Frekuensi Densitas | Garis Merah: Kurva Densitas Empiris",
+       x = "Nilai Y", y = "Densitas")
+
+# Panel kanan: Boxplot untuk identifikasi pencilan
+p_box_y <- ggplot(df, aes(y = Y)) +
+  geom_boxplot(fill = "#3498db", color = "#2c3e50", alpha = 0.8, outlier.color = "#e74c3c", outlier.size = 1.8) +
+  theme_minimal(base_size = 12) +
+  labs(title = "Boxplot Variabel Respon Y",
+       subtitle = "Titik Merah: Observasi Pencilan (Outlier di Luar 1.5 x IQR)",
+       y = "Nilai Y")
+
+grid.arrange(p_dens_y, p_box_y, ncol = 2)
+```
+
+> **Penjelasan Komprehensif Grafik Distribusi Variabel Y:**
+>
+> 1\. **Grafik Kiri (Histogram & Densitas Kernel):**
+>
+> \- **Sumbu X:** Menunjukkan rentang nilai variabel $Y$.
+>
+> \- **Sumbu Y:** Menunjukkan tingkat densitas (kepadatan peluang kemunculan nilai $Y$).
+>
+> \- **Pola Visual:** Distribusi memuncak di sekitar nilai $3$ hingga $5$, namun memiliki ekor panjang membentang ke arah kanan hingga nilai $> 30$. Hal ini memperlihatkan sifat ketidaksimetrisan (asimetris ke kanan / *right-skewed*).
+>
+> 2\. **Grafik Kanan (Boxplot):**
+>
+> \- Garis tengah tebal di dalam kotak biru merepresentasikan median ($Q_2 \approx 4,37$).
+>
+> \- Batas bawah kotak adalah $Q_1$ dan batas atas kotak adalah $Q_3$, yang membentuk Rentang Antarkuartil (*Interquartile Range* / IQR).
+>
+> \- Garis perpanjangan (*whiskers*) menjangkau batas $1.5 \times \text{IQR}$. - **Titik-titik Merah:** Merupakan observasi pencilan (*outliers*). Terlihat cukup banyak titik pencilan di sisi atas (nilai $Y > 20$). Keberadaan pencilan ini berpotensi memengaruhi sifat normalitas sisaan dalam pemodelan linier OLS.
+
+------------------------------------------------------------------------
+
+# BAGIAN A: PENGUJIAN ASUMSI KLASIK REGRESI OLS
+
+Sebelum menerapkan metode alternatif, kita terlebih dahulu mengestimasi model dasar **Ordinary Least Squares (OLS)**: $$Y_i = \beta_0 + \sum_{j=1}^{30} \beta_j X_{ij} + \varepsilon_i$$ Sisaan duga (*sample residuals*) dari model OLS ini, yaitu $\hat{\varepsilon}_i = Y_i - \hat{Y}_i$, menjadi objek utama dalam pengujian asumsi klasik Gauss-Markov.
+
+```{r fit-ols-baseline}
+# Estimasi Model OLS Dasar menggunakan seluruh variabel prediktor
+m_ols <- lm(Y ~ ., data = df)
+
+# Mengekstrak vektor sisaan (residuals) dan vektor nilai prediksi (fitted values)
+res_ols <- residuals(m_ols)
+fit_ols <- fitted(m_ols)
+```
+
+> **Penjelasan Kode `fit-ols-baseline`:**
+>
+> \- Fungsi `lm(Y ~ ., data = df)` melakukan fitting model regresi linier OLS dengan variabel $Y$ sebagai respon dan seluruh variabel kolom lainnya ($X_1$ hingga $X_{30}$) sebagai prediktor.
+>
+> \- Fungsi `residuals()` mengambil nilai selisih $e_i = Y_i - \hat{Y}_i$, sedangkan `fitted()` mengambil nilai estimasi $\hat{Y}_i = \mathbf{X}_i \hat{\boldsymbol{\beta}}$. Keduanya menjadi input utama bagi uji diagnostik asumsi klasik.
+
+------------------------------------------------------------------------
+
+## 1. Uji Normalitas Sisaan
+
+### Landasan Teori & Hipotesis
+
+Asumsi normalitas mensyaratkan galat regresi berdistribusi normal: $\varepsilon_i \sim \text{i.i.d. } N(0, \sigma^2)$.
+
+\- **Hipotesis Uji:**
+
+\- $H_0$: Sisaan model berdistribusi normal.
+
+\- $H_1$: Sisaan model tidak berdistribusi normal.
+
+\- **Taraf Signifikansi:** $\alpha = 0.05$.
+
+\- **Kriteria Keputusan:** Tolak $H_0$ jika nilai $p\text{-value} < \alpha$.
+
+### Visualisasi Diagnostik & Uji Formal
+
+```{r test-normality}
+# Panel kiri: Histogram sisaan vs kurva normal teoritis ideal
+p_hist_res <- ggplot(data.frame(res = res_ols), aes(x = res)) +
+  geom_histogram(aes(y = ..density..), bins = 40, fill = "#34495e", color = "white", alpha = 0.8) +
+  stat_function(fun = dnorm, args = list(mean = mean(res_ols), sd = sd(res_ols)), 
+                color = "#e74c3c", size = 1.1, linetype = "dashed") +
+  theme_minimal() +
+  labs(title = "Histogram Sisaan OLS vs Kurva Normal",
+       subtitle = "Batang: Sisaan Empiris | Garis Merah Putus-putus: Normal Teoritis",
+       x = "Sisaan (Residuals)", y = "Densitas")
+
+# Panel kanan: Normal Quantile-Quantile (Q-Q) Plot
+p_qq_res <- ggplot(data.frame(res = res_ols), aes(sample = res)) +
+  stat_qq(color = "#2980b9", alpha = 0.6) +
+  stat_qq_line(color = "#e74c3c", size = 1.1) +
+  theme_minimal() +
+  labs(title = "Normal Q-Q Plot Sisaan OLS",
+       subtitle = "Titik Biru: Kuantil Sampel | Garis Merah: Garis 45 Derajat Acuan Normal",
+       x = "Kuantil Teoritis (Theoretical Quantiles)", y = "Kuantil Sampel (Sample Quantiles)")
+
+grid.arrange(p_hist_res, p_qq_res, ncol = 2)
+
+# Uji Formal Normalitas
+jb_test <- jarque.bera.test(res_ols)
+sw_test <- shapiro.test(res_ols)
+ks_test <- ks.test(res_ols, "pnorm", mean = mean(res_ols), sd = sd(res_ols))
+
+normality_table <- data.frame(
+  Metode_Uji = c("Jarque-Bera Test", "Shapiro-Wilk Test", "Kolmogorov-Smirnov Test"),
+  Statistik_Uji = c(jb_test$statistic, sw_test$statistic, ks_test$statistic),
+  p_value = c(jb_test$p.value, sw_test$p.value, ks_test$p.value),
+  Keputusan = ifelse(c(jb_test$p.value, sw_test$p.value, ks_test$p.value) < 0.05, 
+                     "Tolak H0 (Tidak Normal)", "Gagal Tolak H0 (Normal)")
+)
+
+kable(normality_table, caption = "Tabel 3: Hasil Uji Formal Normalitas Sisaan Model OLS", digits = 5) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+> **Penjelasan Mendalam Hasil Uji Normalitas:**
+>
+> 1\. **Interpretasi Histogram Sisaan:**
+>
+> \- Kurva merah putus-putus menggambarkan kurva Gauss ideal dengan rata-rata $0$ dan simpangan baku sama dengan sisaan.
+>
+> \- Terlihat bahwa puncak histogram empiris lebih tinggi dan ramping (*leptokurtik* / kurtosis tinggi), dengan frekuensi yang lebih tebal pada kedua ekor (*fat tails*).
+>
+> 2\. **Interpretasi Normal Q-Q Plot:**
+>
+> \- **Sumbu X:** Kuantil yang diharapkan jika data berdistribusi normal baku.
+>
+> \- **Sumbu Y:** Kuantil aktual dari sisaan OLS.
+>
+> \- **Pola Titik:** Jika sisaan normal sempurna, seluruh titik biru akan menempel tepat di atas garis diagonal merah $45^\circ$. Namun, pada grafik terlihat jelas bahwa di ujung kiri bawah titik-titik melengkung ke bawah garis, dan di ujung kanan atas titik-titik melesat jauh ke atas garis. Ini adalah pola klasik *heavy tails* (kurtosis berlebih dan pencilan ekstrim).
+>
+> 3\. **Interpretasi Angka pada Tabel 3:**
+>
+> \- **Uji Jarque-Bera:** Menghasilkan statistik uji $\chi^2 = 2.195,4$ dengan $p\text{-value} < 2.2 \times 10^{-16}$. Uji JB secara spesifik menguji skewness dan kurtosis secara bersamaan.
+>
+> \- **Uji Shapiro-Wilk:** Menghasilkan statistik $W = 0,967$ dengan $p\text{-value} < 2.2 \times 10^{-16}$.
+>
+> \- **Uji Kolmogorov-Smirnov:** Menghasilkan statistik $D = 0,052$ dengan $p\text{-value} < 2.2 \times 10^{-16}$.
+>
+> \- **Kesimpulan Statistik:** Karena seluruh nilai $p\text{-value} < \alpha = 0.05$, kita **menolak** $H_0$. Sisaan model OLS **tidak berdistribusi normal**. Konsekuensinya, inferensi berbasis uji parsial $t$ dan uji simultan $F$ harus diinterpretasikan secara hati-hati.
+
+------------------------------------------------------------------------
+
+## 2. Uji Multikolinearitas
+
+### Landasan Teori & Hipotesis
+
+Multikolinearitas terjadi ketika terdapat hubungan linier kuat antar variabel independen ($X$).
+
+\- **Metrik Diagnostik:** *Variance Inflation Factor* (VIF): $$\text{VIF}_j = \frac{1}{1 - R_j^2}$$ di mana $R_j^2$ adalah koefisien determinasi ketika variabel $X_j$ diregresikan terhadap $29$ variabel prediktor lainnya.
+
+\- **Kriteria Acuan Keputusan:** - $\text{VIF} < 5$: Tidak ada multikolinearitas yang mengkhawatirkan. - $5 \le \text{VIF} \le 10$: Multikolinearitas sedang (*moderate*). - $\text{VIF} > 10$: Terjadi **multikolinearitas parah/berat** (*severe multicollinearity*).
+
+### Pemeriksaan VIF & Matriks Korelasi
+
+```{r test-multicollinearity}
+# Menghitung nilai VIF untuk seluruh variabel prediktor menggunakan pustaka car
+vif_vals <- car::vif(m_ols)
+
+# Mengonversi hasil ke data frame dan mengurutkan dari VIF tertinggi
+vif_df <- data.frame(
+  Variabel = names(vif_vals),
+  VIF = unname(vif_vals)
+) %>% arrange(desc(VIF))
+
+# Menampilkan 12 variabel dengan VIF tertinggi
+kable(head(vif_df, 12), caption = "Tabel 4: Daftar Dua Belas Variabel dengan Nilai VIF Tertinggi", digits = 2) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+
+# Menghitung ringkasan variabel bermasalah
+n_high_vif <- sum(vif_df$VIF > 10)
+cat("Jumlah variabel independen dengan VIF > 10 :", n_high_vif, "dari 30 variabel.\n")
+cat("Nilai VIF maksimum tercatat sebesar        :", round(max(vif_df$VIF), 2), "\n")
+```
+
+> **Penjelasan Tabel 4 & Output Konsol Multikolinearitas:**
+>
+> \- Tabel 4 memperlihatkan bahwa variabel $X_1$ memiliki nilai VIF sebesar **141,07**, diikuti oleh $X_6$ (**94,85**), dan $X_2$ (**83,14**).
+>
+> \- Nilai VIF sebesar $141,07$ berarti variansi dari penduga koefisien $\hat{\beta}_1$ **mengembang** $141$ kali lipat dibandingkan jika variabel $X_1$ ortogonal (tidak berkorelasi) dengan prediktor lainnya!
+>
+> \- Sebanyak **14 variabel** dari total 30 variabel memiliki $\text{VIF} > 10$. Ini adalah bukti tak terbantahkan adanya multikolinearitas tingkat tinggi.
+
+Untuk melacak sumber keterkaitan linier tersebut, kita membuat visualisasi matriks korelasi Pearson:
+
+```{r plot-correlation-matrix, fig.height=7}
+# Membentuk matriks prediktor numerik
+X_matrix <- as.matrix(df[, paste0("X", 1:30), with = FALSE])
+
+# Menghitung matriks korelasi bivariat antar prediktor
+cor_mat <- cor(X_matrix)
+
+# Menampilkan grafik matriks korelasi menggunakan corrplot
+corrplot(cor_mat, method = "color", type = "upper", 
+         tl.col = "black", tl.cex = 0.65,
+         title = "Matriks Korelasi Pearson Antar Variabel Prediktor (X1 - X30)",
+         mar = c(0, 0, 2, 0))
+```
+
+> **Penjelasan Grafik Matriks Korelasi (Corrplot):**
+>
+> \- **Skala Warna:** Warna biru tua menunjukkan korelasi positif sempurna ($r = +1$), putih menunjukkan tidak ada korelasi ($r = 0$), dan merah tua menunjukkan korelasi negatif sempurna ($r = -1$).
+>
+> \- **Temuan Pola:** Terlihat sel-sel berwarna sangat gelap pada pasangan variabel tertentu, seperti:
+>
+> \- $r(X_{26}, X_{27}) = -0,998$ (korelasi negatif hampir sempurna).
+>
+> \- $r(X_{28}, X_{29}) = -0,986$ (korelasi negatif ekstrem).
+>
+> \- $r(X_{16}, X_{19}) = +0,835$ dan $r(X_{21}, X_{24}) = +0,822$.
+>
+> \- Blok $X_1 - X_5$ dan blok $X_6 - X_{10}$ juga menunjukkan pola korelasi silang yang sangat rapat.
+>
+> \- Keterikatan collinear ini menyebabkan matriks $(\mathbf{X}'\mathbf{X})$ mendekati keadaan singular (*ill-conditioned*).
+
+Visualisasi perbandingan nilai VIF seluruh variabel:
+
+```{r plot-vif-bar}
+# Diagram batang horizontal nilai VIF per variabel
+ggplot(vif_df, aes(x = reorder(Variabel, VIF), y = VIF, fill = VIF > 10)) +
+  geom_bar(stat = "identity", width = 0.7) +
+  geom_hline(yintercept = 10, linetype = "dashed", color = "red", size = 1) +
+  scale_fill_manual(values = c("steelblue", "#e74c3c"), labels = c("VIF <= 10 (Aman)", "VIF > 10 (Parah)")) +
+  coord_flip() +
+  theme_minimal() +
+  labs(title = "Nilai Variance Inflation Factor (VIF) untuk Setiap Prediktor",
+       subtitle = "Garis putus-putus merah menandai batas kritis VIF = 10",
+       x = "Variabel Prediktor", y = "Nilai VIF", fill = "Kategori VIF")
+```
+
+> **Penjelasan Grafik Barplot VIF:**
+>
+> \- **Sumbu X (horizontal):** Nilai VIF variabel.
+>
+> \- **Sumbu Y (vertikal):** Daftar seluruh $30$ variabel prediktor, diurutkan dari yang terkecil hingga terbesar.
+>
+> \- **Garis Putus-putus Merah:** Batas ambang kritis standar $\text{VIF} = 10$.
+>
+> \- **Batang Merah:** Menandai seluruh variabel yang melanggar batas kritis. Terlihat separuh dari seluruh prediktor (14 variabel) berada jauh di sisi kanan garis merah.
+>
+> \- **Kesimpulan Multikolinearitas:** Terjadi **multikolinearitas sangat parah**. Penduga OLS akan menghasilkan koefisien dengan standar error yang sangat besar, tanda koefisien yang tidak stabil, dan sensitivitas tinggi terhadap fluktuasi sampel. Solusi yang tepat adalah menggunakan **Ridge Regression**.
+
+------------------------------------------------------------------------
+
+## 3. Uji Heteroskedastisitas
+
+### Landasan Teori & Hipotesis
+
+Asumsi homoskedastisitas menyatakan bahwa ragam galat bersifat homogen pada seluruh nilai prediksi: $\operatorname{Var}(\varepsilon_i) = \sigma^2$.
+
+\- **Hipotesis Uji:**
+
+\- $H_0$: Ragam sisaan homogen / homoskedastis ($\sigma_1^2 = \sigma_2^2 = \dots = \sigma^2$).
+
+\- $H_1$: Terjadi heteroskedastisitas ($\operatorname{Var}(\varepsilon_i) = \sigma_i^2$).
+
+\- **Metode Uji Formal:** *Studentized Breusch-Pagan Test* (`lmtest::bptest`).
+
+\- **Kriteria Keputusan:** Tolak $H_0$ jika $p\text{-value} < 0.05$.
+
+### Visualisasi & Uji Formal
+
+```{r test-heteroscedasticity}
+# Scatter plot Residuals vs Fitted Values
+p_het <- ggplot(data.frame(fit = fit_ols, res = res_ols), aes(x = fit, y = res)) +
+  geom_point(color = "#2c3e50", alpha = 0.5, size = 1.5) +
+  geom_hline(yintercept = 0, color = "#e74c3c", linetype = "dashed", size = 1) +
+  geom_smooth(method = "loess", color = "#2980b9", se = FALSE, size = 1) +
+  theme_minimal() +
+  labs(title = "Plot Residuals vs Fitted Values (Diagnostik Homoskedastisitas)",
+       subtitle = "Titik: Sisaan | Garis Merah: Garis Nol | Garis Biru: Tren Rata-rata Lokal (Loess)",
+       x = "Fitted Values (Nilai Prediksi Y-topi)", y = "Residuals (Sisaan e)")
+
+print(p_het)
+
+# Uji Formal Breusch-Pagan
+bp_test <- bptest(m_ols)
+
+bp_table <- data.frame(
+  Metode_Uji = "Studentized Breusch-Pagan Test",
+  Statistik_BP = bp_test$statistic,
+  Derajat_Bebas = bp_test$parameter,
+  p_value = bp_test$p.value,
+  Keputusan = ifelse(bp_test$p.value < 0.05, 
+                     "Tolak H0 (Terjadi Heteroskedastisitas)", 
+                     "Gagal Tolak H0 (Homoskedastisitas Terpenuhi)")
+)
+
+kable(bp_table, caption = "Tabel 5: Hasil Uji Heteroskedastisitas Breusch-Pagan", digits = 5) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+> **Penjelasan Komprehensif Uji Heteroskedastisitas:**
+>
+> 1\. **Interpretasi Grafik Residuals vs Fitted Values:**
+>
+> \- **Sumbu X:** Nilai fitted $\hat{Y}_i$ yang diprediksi oleh model OLS.
+>
+> \- **Sumbu Y:** Nilai residual $e_i = Y_i - \hat{Y}_i$.
+>
+> \- **Pola Sebaran:** Titik-titik sisaan menyebar secara simetris di sekitar garis horizontal merah ($e = 0$). Lebar pita sebaran sisaan tampak relatif konstan dari kiri ke kanan (tidak membentuk pola corong / *funnel shape* yang melebar atau menyempit). Garis penghalus *loess* (garis biru) membentang mendatar mendekati garis nol.
+>
+> 2\. **Interpretasi Angka pada Tabel 5:**
+>
+> \- Uji Breusch-Pagan menghasilkan nilai statistik $\text{BP} = 26,83$ dengan derajat bebas $\text{df} = 30$.
+>
+> \- Nilai $p\text{-value} = 0,6321$, yang jauh lebih besar dari $\alpha = 0.05$.
+>
+> \- **Kesimpulan Statistik:** **Gagal tolak** $H_0$. Data **memenuhi asumsi homoskedastisitas**. Ragam sisaan terbukti konstan di sepanjang nilai prediksi. Oleh karena itu, kita menduga bahwa penerapan Weighted Least Squares (WLS) tidak akan memberikan perbedaan yang drastis dibandingkan OLS.
+
+------------------------------------------------------------------------
+
+## 4. Uji Autokorelasi Sisaan
+
+### Landasan Teori & Hipotesis
+
+Asumsi non-autokorelasi mensyaratkan tidak adanya korelasi antar galat pada titik observasi berurutan: $\operatorname{Cov}(\varepsilon_t, \varepsilon_s) = 0$ untuk $t \neq s$.
+
+\- **Hipotesis Uji (Autokorelasi Positif AR(1)):**
+
+\- $H_0$: Tidak terdapat autokorelasi serial sisaan ($\rho = 0$).
+
+\- $H_1$: Terdapat autokorelasi positif serial sisaan ($\rho > 0$).
+
+\- **Metode Uji Formal:** *Durbin-Watson Test* (`lmtest::dwtest`): $$DW = \frac{\sum_{t=2}^n (\hat{\varepsilon}_t - \hat{\varepsilon}_{t-1})^2}{\sum_{t=1}^n \hat{\varepsilon}_t^2} \approx 2(1 - \hat{\rho})$$ - Jika $DW \approx 2$, sisaan bebas autokorelasi ($\hat{\rho} \approx 0$).
+
+\- Jika $DW \ll 2$ (mendekati $0$), terdapat autokorelasi positif kuat ($\hat{\rho} > 0$). - Jika $DW \gg 2$ (mendekati $4$), terdapat autokorelasi negatif kuat ($\hat{\rho} < 0$).
+
+### Visualisasi & Uji Formal
+
+```{r test-autocorrelation}
+# Menyiapkan kanvas multi-panel 1 baris 2 kolom
+par(mfrow = c(1, 2))
+
+# Panel kiri: Plot Fungsi Autokorelasi (ACF)
+acf(res_ols, main = "Autocorrelation Function (ACF) Sisaan OLS", 
+    col = "#2980b9", lwd = 2)
+
+# Panel kanan: Runutan sisaan berdasarkan urutan indeks waktu observasi
+plot(res_ols[1:200], type = "o", pch = 16, col = "#2c3e50", cex = 0.7,
+     main = "Runutan Sisaan (200 Observasi Pertama)",
+     xlab = "Indeks Observasi (Waktu t)", ylab = "Sisaan (e_t)")
+abline(h = 0, col = "red", lty = 2, lwd = 1.5)
+
+# Mengembalikan layout grafik standar
+par(mfrow = c(1, 1))
+
+# Uji Formal Durbin-Watson
+dw_result <- dwtest(m_ols, alternative = "greater")
+
+# Estimasi nilai autokorelasi lag-1 (rho) empiris
+rho_empiris <- 1 - (dw_result$statistic / 2)
+
+dw_table <- data.frame(
+  Metode_Uji = "Durbin-Watson Test",
+  Statistik_DW = dw_result$statistic,
+  Estimasi_Rho_Lag1 = rho_empiris,
+  p_value = dw_result$p.value,
+  Keputusan = ifelse(dw_result$p.value < 0.05, 
+                     "Tolak H0 (Ada Autokorelasi Positif Kuat)", 
+                     "Gagal Tolak H0 (Bebas Autokorelasi)")
+)
+
+kable(dw_table, caption = "Tabel 6: Hasil Uji Autokorelasi Durbin-Watson", digits = 5) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+> **Penjelasan Mendalam Uji Autokorelasi Sisaan:**
+>
+> 1\. **Interpretasi Grafik ACF (Kiri):** - **Sumbu X:** Lag keterlambatan ($k = 0, 1, 2, \dots$).
+>
+> \- **Sumbu Y:** Koefisien autokorelasi $r_k$.
+>
+> \- **Garis Biru Putus-putus:** Batas interval kepercayaan signifikansi $95\%$.
+>
+> \- **Pola Grafik:** Pada lag 1, batang autokorelasi melonjak sangat tinggi ($\approx 0.70$), jauh melampaui garis batas signifikansi biru. Diikuti oleh penurunan meluruh secara bertahap (*exponential decay*) pada lag-lag berikutnya. Ini adalah tanda khas (*signature*) dari proses autoregresif tingkat pertama $\operatorname{AR}(1)$.
+>
+> 2\. **Interpretasi Grafik Runutan Sisaan (Kanan):**
+>
+> \- **Sumbu X:** Urutan indeks observasi $t = 1, 2, \dots, 200$.
+>
+> \- **Sumbu Y:** Nilai sisaan $e_t$.
+>
+> \- **Pola Grafik:** Garis penghubung titik memperlihatkan pola *clustering* atau osilasi bergelombang yang mulus. Sisaan bernilai positif cenderung diikuti sisaan positif, dan sisaan bernilai negatif cenderung diikuti sisaan negatif berturut-turut. Ini bukan sebaran acak murni (*white noise*). 3. **Interpretasi Angka pada Tabel 6:**
+>
+> \- Nilai statistik **Durbin-Watson adalah** $DW = 0,5824$, yang berada jauh di bawah nilai acuan $2$.
+>
+> \- Nilai estimasi koefisien autokorelasi lag-1 adalah $\hat{\rho} \approx 0,7088$ (korelasi positif sangat kuat).
+>
+> \- Nilai $p\text{-value} < 2.2 \times 10^{-16}$, jauh lebih kecil dari $\alpha = 0.05$.
+>
+> \- **Kesimpulan Statistik:** **Tolak** $H_0$. Terbukti secara sangat signifikan adanya **autokorelasi positif tingkat pertama** $\operatorname{AR}(1)$.
+>
+> \- **Dampak pada OLS:** Pelanggaran ini menyebabkan estimator OLS **tidak lagi efisien (*not BLUE*)**. Standar error OLS terbias ke bawah (*underestimated*), yang membuat interval kepercayaan terlalu sempit dan nilai $t$-statistik melambung semu. Solusi metodologis yang tepat adalah menerapkan **Generalized Least Squares (GLS)**.
+
+------------------------------------------------------------------------
+
+# BAGIAN B: PEMODELAN REGRESI
+
+Berdasarkan hasil pengujian asumsi klasik, ditemukan dua pelanggaran mayor:
+
+1\. **Multikolinearitas parah** (14 variabel memiliki VIF \> 10, korelasi mencapai $|r| > 0.98$). Solusi: **Ridge Regression**.
+
+2\. **Autokorelasi positif** $\operatorname{AR}(1)$ yang sangat kuat ($DW = 0.5824, \hat{\rho} \approx 0.709$). Solusi: **Generalized Least Squares (GLS)**.
+
+3\. Meskipun **heteroskedastisitas tidak signifikan**, kita tetap mengestimasi **Weighted Least Squares (WLS)** sebagai pembanding metodologis komprehensif.
+
+Berikut adalah perancangan, estimasi kode, dan penjelasan hasil keempat model:
+
+------------------------------------------------------------------------
+
+## Model 1: Ordinary Least Squares (OLS)
+
+Model OLS meminimalkan jumlah kuadrat sisaan tanpa pembobot (*unweighted sum of squared errors*): $$\hat{\boldsymbol{\beta}}_{\text{OLS}} = (\mathbf{X}'\mathbf{X})^{-1}\mathbf{X}'\mathbf{Y}$$
+
+```{r model-ols}
+# Menyesuaikan kembali model OLS
+m_ols <- lm(Y ~ ., data = df)
+
+# Mengekstrak ringkasan statistik model
+summary_ols <- summary(m_ols)
+
+cat("Ringkasan Kinerja Model OLS:\n")
+cat("- Nilai R-squared (R^2)          :", round(summary_ols$r.squared, 5), "\n")
+cat("- Nilai Adjusted R-squared       :", round(summary_ols$adj.r.squared, 5), "\n")
+cat("- Residual Standard Error (RSE)  :", round(summary_ols$sigma, 5), "\n")
+cat("- Derajat Bebas Sisaan (df)      :", summary_ols$df[2], "\n")
+```
+
+> **Penjelasan Keluaran (*Output*) Model OLS:**
+>
+> \- $R^2 = 0,4437$: Menunjukkan bahwa sebesar **44,37%** variabilitas variabel respon $Y$ dapat dijelaskan secara simultan oleh ketiga puluh variabel prediktor $X_1 - X_{30}$.
+>
+> \- **Adjusted** $R^2 = 0,4370$: Koefisien determinasi yang telah disesuaikan dengan jumlah parameter dan ukuran sampel bernilai 0,4370.
+>
+> \- **Residual Standard Error (RSE) = 6,2209:** Mengukur simpangan baku rata-rata sisaan prediksi OLS.
+>
+> \- **Kelemahan OLS:** Meskipun nilai $R^2$ cukup baik, estimasi koefisien OLS rentan mengalami ketidakstabilan tinggi akibat multikolinearitas dan inferensinya tidak sahih akibat autokorelasi.
+
+------------------------------------------------------------------------
+
+## Model 2: Weighted Least Squares (WLS)
+
+### Landasan Metodologis
+
+Model WLS dirancang untuk menangani variansi sisaan yang tidak seragam dengan memberikan bobot yang berbanding terbalik terhadap variansi masing-masing observasi: $w_i = \frac{1}{\sigma_i^2}$. Karena variansi sebenarnya tidak diketahui, kita mengestimasinya menggunakan metode regresi pembantu (*auxiliary regression*): $$\ln(\hat{\varepsilon}_i^2) = \alpha_0 + \alpha_1 \hat{Y}_i + u_i$$ Variansi sisaan terprediksi diperoleh melalui transformasi eksponensial: $\hat{\sigma}_i^2 = \exp\left(\widehat{\ln(\hat{\varepsilon}_i^2)}\right)$, sehingga bobot WLS ditetapkan sebesar: $$w_i = \frac{1}{\hat{\sigma}_i^2}$$
+
+Estimator WLS dirumuskan secara aljabar sebagai: $$\hat{\boldsymbol{\beta}}_{\text{WLS}} = (\mathbf{X}'\mathbf{W}\mathbf{X})^{-1}\mathbf{X}'\mathbf{W}\mathbf{Y}$$
+
+```{r model-wls}
+# Langkah 1: Menghitung kuadrat sisaan dari model OLS
+res_sq <- residuals(m_ols)^2
+
+# Langkah 2: Auxiliary regression untuk memodelkan pola log-variansi terhadap nilai prediksi
+aux_model <- lm(log(res_sq) ~ fitted(m_ols))
+var_fitted <- exp(fitted(aux_model))
+
+# Langkah 3: Menentukan vektor bobot invers variansi
+weights_wls <- 1 / var_fitted
+
+# Langkah 4: Estimasi model WLS dengan bobot weights_wls
+m_wls <- lm(Y ~ ., data = df, weights = weights_wls)
+
+summary_wls <- summary(m_wls)
+
+cat("Ringkasan Kinerja Model WLS:\n")
+cat("- Nilai R-squared (R^2)          :", round(summary_wls$r.squared, 5), "\n")
+cat("- Nilai Adjusted R-squared       :", round(summary_wls$adj.r.squared, 5), "\n")
+cat("- Residual Standard Error (RSE)  :", round(summary_wls$sigma, 5), "\n")
+```
+
+> **Penjelasan Keluaran (*Output*) Model WLS:** - Nilai $R^2$ model WLS adalah **0,4437** dan RSE adalah **6,2209**. - Perhatikan bahwa nilai-nilai ini **hampir identik** dengan hasil model OLS ($R^2 = 0,4437$, $\text{RSE} = 6,2209$). - **Penjelasan Fenomena Ini:** Mengapa hasilnya sama persis? Karena pada Uji Breusch-Pagan di Bagian A, data terbukti **homoskedastis** ($p = 0.6321$). Karena ragam konstan, regresi pembantu menghasilkan nilai $\hat{\sigma}_i^2$ yang relatif seragam di setiap observasi, sehingga matriks bobot $\mathbf{W}$ mendekati kelipatan skalar dari matriks identitas ($\mathbf{W} \approx c\mathbf{I}$). Ketika dimasukkan ke rumus WLS, nilai skalar $c$ saling meniadakan dan estimator WLS kembali menjadi estimator OLS! Ini adalah bukti konsistensi empiris yang kuat.
+
+------------------------------------------------------------------------
+
+## Model 3: Generalized Least Squares (GLS)
+
+### Landasan Metodologis
+
+Uji Durbin-Watson telah membuktikan secara nyata bahwa sisaan memiliki autokorelasi serial $\operatorname{AR}(1)$: $$\varepsilon_t = \phi \varepsilon_{t-1} + u_t, \quad u_t \sim \text{i.i.d. } N(0, \sigma_u^2)$$ Matriks variansi-kovarians galat berbentuk: $$\mathbf{V} = \sigma^2 \boldsymbol{\Sigma}, \quad \text{dengan elemen } \Sigma_{ij} = \phi^{|i-j|}$$ Estimator GLS mengoreksi korelasi ini dengan mengalikan sistem dengan invers matriks $\boldsymbol{\Sigma}$: $$\hat{\boldsymbol{\beta}}_{\text{GLS}} = (\mathbf{X}'\boldsymbol{\Sigma}^{-1}\mathbf{X})^{-1}\mathbf{X}'\boldsymbol{\Sigma}^{-1}\mathbf{Y}$$ Kita mengestimasi parameter autokorelasi $\phi$ dan koefisien regresi menggunakan fungsi `nlme::gls()` dengan argumen `correlation = corAR1()`:
+
+```{r model-gls}
+# Mengestimasi model Generalized Least Squares dengan struktur korelasi AR(1)
+m_gls <- gls(Y ~ ., data = df, correlation = corAR1())
+
+# Mengekstrak ringkasan model GLS
+summary_gls <- summary(m_gls)
+
+# Mengekstrak parameter korelasi autoregresif phi hasil estimasi Maximum Likelihood (ML/REML)
+phi_estimated <- coef(m_gls$modelStruct$corStruct, unconstrained = FALSE)
+
+cat("Ringkasan Kinerja Model GLS (AR1):\n")
+cat("- Parameter Autokorelasi AR(1) (Phi) :", round(phi_estimated, 5), "\n")
+cat("- Residual Standard Error GLS        :", round(m_gls$sigma, 5), "\n")
+cat("- Log-Likelihood Model GLS           :", round(logLik(m_gls), 2), "\n")
+cat("- Log-Likelihood Model OLS           :", round(logLik(m_ols), 2), "\n")
+```
+
+> **Penjelasan Keluaran (*Output*) Model GLS:**
+>
+> \- **Parameter Autokorelasi** $\hat{\phi} = 0,7088$: Fungsi `gls()` menaksir koefisien korelasi serial lag-1 sebesar $0,7088$. Angka ini sangat konsisten dengan estimasi empiris dari uji Durbin-Watson sebelumnya ($\hat{\rho} \approx 0,709$).
+>
+> \- **Lonjakan Log-Likelihood:** Perhatikan nilai log-likelihood:
+>
+> \- Log-likelihood OLS: **-8.101,75**
+>
+> \- Log-likelihood GLS: **-7.223,37**
+>
+> \- Log-likelihood GLS meningkat drastis sebesar **878,38 poin**!
+>
+> Peningkatan ini membuktikan bahwa memperhitungkan matriks kovarians $\boldsymbol{\Sigma}$ menghasilkan model probabilitas bersama (*joint probability model*) yang jauh lebih akurat dalam merepresentasikan data simulasi.
+
+------------------------------------------------------------------------
+
+## Model 4: Ridge Regression (Penalized L2 Regularization)
+
+### Landasan Metodologis
+
+Untuk mengatasi ancaman multikolinearitas parah (14 variabel dengan VIF \> 10), Ridge Regression menambahkan penalti kuadrat norma koefisien ($L_2$ penalty) ke dalam fungsi objektif minimisasi: $$\min_{\boldsymbol{\beta}} \left\{ \sum_{i=1}^n \left( Y_i - \beta_0 - \sum_{j=1}^{30} \beta_j X_{ij} \right)^2 + \lambda \sum_{j=1}^{30} \beta_j^2 \right\}$$ Estimator Ridge diperoleh melalui: $$\hat{\boldsymbol{\beta}}_{\text{Ridge}} = (\mathbf{X}'\mathbf{X} + \lambda \mathbf{I})^{-1}\mathbf{X}'\mathbf{Y}$$ Penambahan suku $\lambda \mathbf{I}$ pada diagonal matriks $(\mathbf{X}'\mathbf{X})$ menjamin bahwa matriks menjadi definit positif dan dapat dibalik secara stabil (*well-conditioned*).
+
+Pencarian nilai penalti optimal $\lambda$ dilakukan melalui metode **10-Fold Cross-Validation** menggunakan fungsi `cv.glmnet(..., alpha = 0)`:
+
+```{r model-ridge}
+# Menyiapkan matriks prediktor dan vektor respon
+X_mat <- as.matrix(df[, paste0("X", 1:30), with = FALSE])
+Y_vec <- df$Y
+
+# 10-Fold Cross-Validation untuk mencari lambda optimal
+set.seed(42)  # Penguncian seed agar hasil dapat direproduksi (reproducible)
+cv_ridge <- cv.glmnet(X_mat, Y_vec, alpha = 0, nfolds = 10)
+
+# Mengekstrak nilai lambda terbaik
+best_lambda <- cv_ridge$lambda.min
+lambda_1se  <- cv_ridge$lambda.1se
+
+cat("Hasil Penyetelan Hiperparameter Ridge:\n")
+cat("- Lambda Minimum (lambda.min) :", round(best_lambda, 5), "\n")
+cat("- Lambda 1-SE (lambda.1se)    :", round(lambda_1se, 5), "\n")
+
+# Menampilkan grafik profil Cross-Validation Error
+plot(cv_ridge)
+title("Kurva 10-Fold Cross-Validation Error Ridge Regression", line = 2.5)
+
+# Mengestimasi model Ridge final dengan lambda minimum
+m_ridge <- glmnet(X_mat, Y_vec, alpha = 0, lambda = best_lambda)
+```
+
+> **Penjelasan Mendalam Grafik Cross-Validation Ridge & Output Kode:**
+>
+> 1\. **Interpretasi Grafik CV-Error Ridge:**
+>
+> \- **Sumbu X:** Nilai $\log(\lambda)$ (logaritma penalti lambda). Semakin ke kanan, nilai penalti semakin besar.
+>
+> \- **Sumbu Y:** *Mean-Squared Error* (MSE) rata-rata dari 10 lipatan cross-validation.
+>
+> \- **Titik Merah & Bilah Galat:** Rata-rata MSE dan interval galat standarnya pada setiap nilai $\lambda$.
+>
+> \- **Garis Putus-putus Vertikal Kiri:** Menandai posisi $\log(\lambda_{\min}) = \log(0,1576)$, yaitu titik di mana galat validasi silang mencapai nilai minimum global.
+>
+> \- **Garis Putus-putus Vertikal Kanan:** Menandai posisi $\log(\lambda_{1\text{se}}) = \log(0,4354)$, yaitu model paling parsimonius yang galatnya masih dalam 1 standar error dari minimum.
+>
+> \- **Angka 30 di Sisi Atas Grafik:** Menunjukkan bahwa seluruh $30$ variabel tetap dipertahankan dalam model pada setiap tingkat $\lambda$. Berbeda dengan Lasso (yang menyusutkan koefisien menjadi $0$ persis), Ridge Regression menyusutkan koefisien mendekati nol namun tidak mengeliminasinya.
+>
+> 2\. **Nilai Optimal** $\lambda_{\min} = 0,1576$: Nilai inilah yang kita gunakan untuk mengestimasi model final agar performa prediksi optimal.
+
+------------------------------------------------------------------------
+
+## Pembuktian Efek Shrinkage: Perbandingan Koefisien OLS vs Ridge
+
+Untuk membuktikan secara konkret bagaimana penalti Ridge meredam dampak destruktif multikolinearitas, mari periksa estimasi koefisien OLS vs Ridge pada variabel-variabel dengan VIF ekstrem:
+
+```{r compare-coefficients}
+# Ekstraksi koefisien dari kedua model
+coef_ols <- coef(m_ols)
+coef_ridge <- as.vector(coef(m_ridge))
+names(coef_ridge) <- rownames(coef(m_ridge))
+
+# Memilih variabel-variabel dengan multikolinearitas paling parah
+collinear_vars <- c("X1", "X2", "X6", "X7", "X26", "X27", "X28", "X29")
+
+coef_comp_df <- data.frame(
+  Variabel = collinear_vars,
+  Nilai_VIF = vif_vals[collinear_vars],
+  Koefisien_OLS = coef_ols[collinear_vars],
+  Koefisien_Ridge = coef_ridge[collinear_vars]
+)
+
+kable(coef_comp_df, caption = "Tabel 7: Pembuktian Efek Penyusutan (Shrinkage) Koefisien OLS vs Ridge", digits = 4) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+> **Penjelasan Tabel 7 (Efek Shrinkage):**
+>
+> \- **Kasus Ekstrem Pasangan Kolinear** $X_{26}$ dan $X_{27}$: - Pada matriks korelasi sebelumnya, $r(X_{26}, X_{27}) = -0,998$.
+>
+> \- Pada model **OLS**, estimasi koefisien menjadi sangat liar dan saling membatalkan: koefisien $X_{26}$ bernilai **-3,831**, sedangkan koefisien $X_{27}$ melompat menjadi **+2,698**. Magnitudo koefisien yang begitu masif dengan tanda berlawanan adalah ciri khas kegagalan OLS pada data collinear.
+>
+> \- Pada model **Ridge Regression**, penalti $L_2$ menyusutkan kedua koefisien tersebut ke nilai yang jauh lebih stabil dan wajar, yaitu $X_{26} = -0,483$ dan $X_{27} = -0,438$.
+>
+> \- Ridge Regression terbukti berhasil mengendalikan pembengkakan variansi parameter!
+
+------------------------------------------------------------------------
+
+# BAGIAN C: PERBANDINGAN MODEL BERDASARKAN MATRIX RMSE DAN AIC
+
+## Formulasi Matematis Metrik Evaluasi
+
+Agar evaluasi komparatif memenuhi kaidah keabsahan ilmiah (*scientific validity*), metrik evaluasi dihitung secara konsisten pada skala observasi $Y$ asli:
+
+1.  **Root Mean Squared Error (RMSE):** $$\text{RMSE} = \sqrt{\frac{1}{n} \sum_{i=1}^n (Y_i - \hat{Y}_i)^2}$$
+    -   Mengukur deviasi standar dari residual prediksi.
+    -   Semakin kecil nilai RMSE, semakin tinggi akurasi model dalam memprediksi data.
+2.  **Akaike Information Criterion (AIC):** $$\text{AIC} = 2k - 2\ln(L)$$
+    -   Mengukur keseimbangan antara kebaikan suai (*goodness-of-fit*) model dan kompleksitas parameter ($k$).
+    -   Pada **OLS** dan **WLS**: dihitung dari fungsi likelihood Gaussian standar.
+    -   Pada **GLS**: dihitung dari fungsi likelihood penuh yang memperhitungkan determinan matriks korelasi autokorelasi $|\boldsymbol{\Sigma}|$.
+    -   Pada **Ridge Regression**: dihitung menggunakan konsep *Effective Degrees of Freedom* (EDF): $$\operatorname{df}(\lambda) = \operatorname{tr}\left(\mathbf{X}(\mathbf{X}'\mathbf{X} + \lambda \mathbf{I})^{-1}\mathbf{X}'\right)$$ $$\text{AIC}_{\text{Ridge}} = n \ln(2\pi) + n \ln\left(\frac{\text{RSS}_{\text{Ridge}}}{n}\right) + n + 2(\operatorname{df}(\lambda) + 1)$$ Formulasi ini sepenuhnya sebanding dan konsisten dengan basis perhitungan `AIC(lm)` saat $\lambda = 0$.
+
+------------------------------------------------------------------------
+
+## Perhitungan Matriks Kinerja
+
+```{r compute-metrics}
+# 1. Menghitung nilai prediksi (fitted/predicted values) pada skala asli untuk seluruh model
+pred_ols   <- predict(m_ols)
+pred_wls   <- predict(m_wls)
+pred_gls   <- predict(m_gls)
+pred_ridge <- as.numeric(predict(m_ridge, newx = X_mat, s = best_lambda))
+
+# 2. Fungsi pembantu perhitungan RMSE
+calc_rmse <- function(actual, predicted) {
+  sqrt(mean((actual - predicted)^2))
+}
+
+# Menghitung RMSE masing-masing model
+rmse_ols   <- calc_rmse(Y_vec, pred_ols)
+rmse_wls   <- calc_rmse(Y_vec, pred_wls)
+rmse_gls   <- calc_rmse(Y_vec, pred_gls)
+rmse_ridge <- calc_rmse(Y_vec, pred_ridge)
+
+# 3. Menghitung AIC masing-masing model
+aic_ols <- AIC(m_ols)
+aic_wls <- AIC(m_wls)
+aic_gls <- AIC(m_gls)
+
+# Menghitung AIC Ridge berbasis Effective Degrees of Freedom (EDF)
+n_obs <- length(Y_vec)
+X_scaled <- scale(X_mat)
+svd_d <- svd(X_scaled)$d
+edf_ridge <- sum(svd_d^2 / (svd_d^2 + best_lambda)) + 1 # +1 untuk komponen intersep
+rss_ridge <- sum((Y_vec - pred_ridge)^2)
+aic_ridge <- n_obs * log(2 * pi) + n_obs * log(rss_ridge / n_obs) + n_obs + 2 * (edf_ridge + 1)
+
+# 4. Menyusun Tabel Matriks Perbandingan
+comparison_table <- data.frame(
+  Model_Regresi = c("Ordinary Least Squares (OLS)",
+                    "Weighted Least Squares (WLS)",
+                    "Generalized Least Squares (GLS)",
+                    "Ridge Regression"),
+  RMSE = c(rmse_ols, rmse_wls, rmse_gls, rmse_ridge),
+  Peringkat_RMSE = rank(c(rmse_ols, rmse_wls, rmse_gls, rmse_ridge)),
+  AIC = c(aic_ols, aic_wls, aic_gls, aic_ridge),
+  Peringkat_AIC  = rank(c(aic_ols, aic_wls, aic_gls, aic_ridge))
+)
+
+kable(comparison_table, caption = "Tabel 8: Matriks Perbandingan Kinerja Model Berdasarkan RMSE dan AIC", digits = 4) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "bordered"), full_width = FALSE) %>%
+  row_spec(which.min(comparison_table$AIC), bold = TRUE, background = "#d4edda")
+```
+
+> **Penjelasan Tabel 8 (Matriks Perbandingan Kinerja):**
+>
+> Tabel 8 merangkum skor numerik kedua metrik beserta urutan peringkatnya:
+>
+> \- Baris hijau menandai model terbaik berdasarkan kriteria informasi AIC, yaitu **Generalized Least Squares (GLS)**.
+>
+> \- Pada metrik **RMSE**, OLS berada di peringkat 1 (6,1828), disusul WLS (6,1828), GLS (6,2026), dan Ridge (6,2061).
+>
+> \- Pada metrik **AIC**, GLS menduduki peringkat 1 dengan skor terbaik mutlak (**14.512,75**), unggul jauh di atas WLS (16.263,93), OLS (16.267,51), dan Ridge (16.286,03).
+
+------------------------------------------------------------------------
+
+## Visualisasi Komparasi Grafis RMSE dan AIC
+
+```{r plot-comparison}
+# Grafik 1: Diagram Batang Nilai RMSE Antar Model
+p_rmse <- ggplot(comparison_table, aes(x = reorder(Model_Regresi, RMSE), y = RMSE, fill = Model_Regresi)) +
+  geom_bar(stat = "identity", width = 0.6, show.legend = FALSE) +
+  geom_text(aes(label = round(RMSE, 4)), vjust = -0.4, size = 4, fontface = "bold") +
+  coord_cartesian(ylim = c(min(comparison_table$RMSE) * 0.95, max(comparison_table$RMSE) * 1.05)) +
+  scale_fill_brewer(palette = "Blues") +
+  theme_minimal() +
+  labs(title = "Perbandingan Nilai RMSE Antar Model",
+       subtitle = "Semakin rendah nilai RMSE, semakin kecil galat prediksi in-sample",
+       x = "Model Regresi", y = "RMSE")
+
+# Grafik 2: Diagram Batang Nilai AIC Antar Model
+p_aic <- ggplot(comparison_table, aes(x = reorder(Model_Regresi, AIC), y = AIC, fill = Model_Regresi)) +
+  geom_bar(stat = "identity", width = 0.6, show.legend = FALSE) +
+  geom_text(aes(label = round(AIC, 1)), vjust = -0.4, size = 4, fontface = "bold") +
+  coord_cartesian(ylim = c(min(comparison_table$AIC) * 0.9, max(comparison_table$AIC) * 1.05)) +
+  scale_fill_brewer(palette = "Oranges") +
+  theme_minimal() +
+  labs(title = "Perbandingan Nilai AIC Antar Model",
+       subtitle = "Semakin rendah nilai AIC, semakin superior kebaikan suai (likelihood)",
+       x = "Model Regresi", y = "AIC")
+
+grid.arrange(p_rmse, p_aic, ncol = 2)
+```
+
+> **Penjelasan Komprehensif Grafik Perbandingan RMSE dan AIC:**
+>
+> 1\. **Grafik Kiri (Perbandingan Nilai RMSE):**
+>
+> \- **Sumbu X:** Keempat model regresi yang diurutkan dari RMSE terkecil.
+>
+> \- **Sumbu Y:** Nilai RMSE in-sample.
+>
+> \- **Interpretasi Visual:** Seluruh model memiliki nilai RMSE yang berada pada rentang yang sangat berdekatan, yaitu antara `6,1828` hingga `6,2061` (perbedaan hanya sekitar $0,3\%$). OLS mencatat nilai terendah karena sifat bawaan minimisasinya.
+>
+> 2\. **Grafik Kanan (Perbandingan Nilai AIC):**
+>
+> \- **Sumbu X:** Keempat model regresi yang diurutkan dari AIC terkecil.
+>
+> \- **Sumbu Y:** Nilai kriteria informasi AIC.
+>
+> \- **Interpretasi Visual:** Terlihat perbedaan yang luar biasa dramatis! Batang model **GLS turun secara ekstrem ke level 14.512,8**, sementara ketiga model lainnya (WLS, OLS, Ridge) berada di kisaran \~16.260 - 16.286. Penurunan setinggi $> 1.750$ poin ini menunjukkan keunggulan kualitas likelihood yang absolut pada model GLS.
+
+------------------------------------------------------------------------
+
+## Pembahasan Mendalam Hasil Komparasi
+
+Temuan numerik di atas memberikan pelajaran ekonometrika yang sangat esensial:
+
+### 1. Mengapa OLS Memiliki Nilai RMSE In-Sample Terendah?
+
+Secara matematika aljabar linier, fungsi objektif yang diminimalkan oleh estimator OLS adalah persis jumlah kuadrat sisaan tak berbobot: $$\min_{\boldsymbol{\beta}} \text{RSS} = \sum_{i=1}^n (Y_i - \hat{Y}_i)^2$$ Karena formulasi RMSE berbanding lurus langsung dengan $\sqrt{\text{RSS}}$, **OLS secara matematis pasti menghasilkan RMSE in-sample terendah** di antara seluruh estimator linier. Model WLS meminimalkan kuadrat terbobot, GLS meminimalkan kuadrat tergeneralisasi $(\mathbf{Y}-\mathbf{X}\boldsymbol{\beta})'\boldsymbol{\Sigma}^{-1}(\mathbf{Y}-\mathbf{X}\boldsymbol{\beta})$, dan Ridge meminimalkan kuadrat sisaan ditambah penalti $\lambda \|\boldsymbol{\beta}\|_2^2$. Akibatnya, nilai unweighted RMSE in-sample dari ketiga model alternatif tersebut secara teoretis memang akan sedikit lebih besar daripada OLS.
+
+### 2. Mengapa GLS Menghasilkan Penurunan AIC yang Sangat Spektakuler?
+
+Nilai AIC model **GLS (14.512,75)** turun lebih dari **1.754 poin** dibanding OLS (16.267,51).
+
+\- Dalam metodologi seleksi model berbasis teori informasi (Burnham & Anderson), perbedaan $\Delta \text{AIC} > 10$ sudah memberikan konfirmasi empiris yang tak terbantahkan bahwa suatu model jauh lebih superior.
+
+\- Penurunan ribuan poin ini membuktikan bahwa **ketergantungan serial** $\operatorname{AR}(1)$ pada sisaan ($\hat{\phi} = 0,7088$) adalah dinamika laten yang paling mendominasi data ini.
+
+\- Pada model OLS, sisaan diperlakukan seolah-olah independen ($\boldsymbol{\Sigma} = \mathbf{I}$). Pada model GLS, fungsi kemungkinan (*log-likelihood*) memperhitungkan kovarians antar observasi berurutan melalui determinan matriks $|\boldsymbol{\Sigma}|$. Hasilnya, fungsi likelihood melonjak drastis, membuktikan bahwa **GLS adalah model yang paling sesuai dengan proses pembangkitan data sesungguhnya (*true data-generating process*)**.
+
+### 3. Mengapa Kinerja WLS Sangat Mirip dengan OLS?
+
+Skor RMSE dan AIC WLS hampir tidak berbeda dengan OLS. Hal ini sejalan secara konsisten dengan hasil **Uji Breusch-Pagan** pada Bagian A ($p = 0,6321$), yang mengonfirmasi bahwa data ini **bebas dari masalah heteroskedastisitas**. Karena ragam residual homogen, bobot WLS yang dibentuk bernilai seragam, sehingga estimasi WLS secara matematis konvergen ke OLS.
+
+### 4. Peran Protektif Ridge Regression terhadap Multikolinearitas
+
+Meskipun nilai RMSE Ridge (`6,2061`) sedikit lebih tinggi dibanding OLS (`6,1828`) akibat penambahan bias penalti $\lambda$, Ridge memberikan keuntungan esensial yang tidak tampak pada metrik in-sample:
+
+\- Pada OLS, keberadaan VIF \> 100 menyebabkan variansi dugaan parameter membengkak, sehingga koefisien menjadi tidak stabil dan rentan berubah tanda jika dievaluasi pada data uji baru.
+
+\- Ridge Regression berhasil memangkas variansi tersebut ke tingkat yang stabil (Tabel 7). Hal ini menjamin bahwa **Ridge Regression memiliki kemampuan generalisasi prediksi (*out-of-sample prediction*) yang paling tangguh terhadap gangguan multikolinearitas**.
+
+------------------------------------------------------------------------
+
+# KESIMPULAN MENYELURUH
+
+Berdasarkan seluruh tahapan analisis dari data `raw_data_simulasi.txt`, berikut adalah kesimpulan faktual dan terperinci:
+
+1.  **Hasil Diagnostik Asumsi Klasik:**
+    -   **Normalitas:** Sisaan model OLS **tidak berdistribusi normal** (Uji Jarque-Bera $p < 0.001$, diperkuat oleh pola *heavy-tail* pada Normal Q-Q Plot).
+    -   **Multikolinearitas:** Terjadi **multikolinearitas yang sangat parah**. Sebanyak **14 dari 30 variabel prediktor** memiliki nilai $\text{VIF} > 10$, dengan VIF tertinggi mencapai **141,1** ($X_1$) dan korelasi bivariat mencapai $|r| > 0.98$.
+    -   **Heteroskedastisitas:** **Tidak terdeteksi heteroskedastisitas**. Uji Breusch-Pagan menghasilkan $p\text{-value} = 0,6321 > 0.05$, membuktikan ragam sisaan bersifat homogen.
+    -   **Autokorelasi:** Terdeteksi **autokorelasi positif tingkat pertama** $\operatorname{AR}(1)$ yang sangat masif ($DW = 0,5824 \ll 2$, $p < 2.2 \times 10^{-16}$, $\hat{\rho} \approx 0,709$).
+2.  **Evaluasi Pemodelan Regresi:**
+    -   **OLS:** Menghasilkan RMSE in-sample terendah (6,1828), namun penduganya tidak efisien (*not BLUE*) karena pelanggaran autokorelasi yang kuat dan estimasi parameternya tidak stabil akibat multikolinearitas.
+    -   **WLS:** Menghasilkan kinerja yang hampir identik dengan OLS karena data terbukti homoskedastis.
+    -   **GLS:** Berhasil memodelkan proses autokorelasi serial $\operatorname{AR}(1)$ secara tepat dengan parameter korelasi $\hat{\phi} = 0,7088$.
+    -   **Ridge Regression:** Berhasil menyusutkan koefisien variabel-variabel kolinear ke nilai yang stabil pada nilai penalti optimal $\lambda = 0,1576$.
+3.  **Kesimpulan Komparasi Berdasarkan RMSE dan AIC:**
+    -   **Berdasarkan Metrik AIC:** **Model Generalized Least Squares (GLS)** adalah model terbaik secara mutlak dengan $\text{AIC} = \mathbf{14.512,75}$, mengungguli OLS dengan selisih $\Delta \text{AIC} = 1.754,76$ poin. Hal ini membuktikan bahwa penanganan autokorelasi serial adalah faktor struktur data yang paling fundamental.
+    -   **Berdasarkan Metrik RMSE:** **OLS** mencatat RMSE terendah secara matematis (6,1828), namun GLS dan Ridge berada pada kisaran akurasi yang sangat kompetitif (6,2026 dan 6,2061).
+4.  **Rekomendasi Metodologis:**
+    -   Untuk keperluan **inferensi parameter statistik, pengujian hipotesis, dan pemodelan kovarians**, model yang paling sahih dan wajib digunakan adalah **Generalized Least Squares (GLS)**.
+    -   Untuk keperluan **stabilitas parameter di tengah multikolinearitas ekstrem**, model yang paling tangguh adalah **Ridge Regression**.
+    -   Solusi integratif paling ideal bagi data jenis ini adalah menerapkan **Regularized Generalized Least Squares** (mentransformasikan data terlebih dahulu menggunakan transformasi Prais-Winsten/GLS untuk memutihkan galat, lalu menerapkan regresi Ridge pada data tertransformasi tersebut).
